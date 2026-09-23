@@ -63,7 +63,67 @@ def build_chain() -> Any:
     ``deepseek-v4-flash-vision-exp``. The API key is loaded from .env.
     """
     ### YOUR CODE HERE
-    return None
+    def build_chain() -> Any:
+    """Create and return your LangChain chain once."""
+    
+    import os
+    from langchain_core.prompts import ChatPromptTemplate
+    from langchain_core.output_parsers import JsonOutputParser
+    from langchain_deepseek import ChatDeepSeek
+
+    llm = ChatDeepSeek(
+        model="deepseek-v4-flash-vision-exp",
+        api_key=os.getenv("DEEPSEEK_API_KEY"),
+        temperature=0,
+        max_tokens=512,
+        max_retries=2,
+        timeout=60,
+    )
+
+    system_text = (
+        "You are an expert receipt parser for Hong Kong supermarket receipts. "
+        "You must return ONLY a JSON object, no prose, no markdown fences."
+    )
+
+    human_text = """Analyze the receipt image carefully.
+
+Extract exactly these three things:
+
+1. final_payment:
+   The amount actually charged to the customer after any ROUNDING line.
+   On HK receipts this is often the line labelled "OCTOPUS", "EPS",
+   "CASH", "VISA", "TOTAL", or the last monetary line of the bill.
+   It already INCLUDES the ROUNDING adjustment. Do NOT add it again.
+
+2. subtotal:
+   The line labelled "SUBTOTAL" (before rounding and before any
+   discount is applied). If there is no explicit SUBTOTAL label,
+   use the sum of the item prices minus nothing else.
+
+3. discounts:
+   A list of every discount / promotion / coupon / "x% OFF" line on the
+   receipt. Store each as a POSITIVE number (drop the minus sign).
+   If there are no discounts, return an empty list [].
+
+Return ONLY this JSON:
+{{
+  "final_payment": <number>,
+  "subtotal": <number>,
+  "discounts": [<number>, ...]
+}}
+"""
+
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", system_text),
+        ("human", [
+            {"type": "text", "text": human_text},
+            {"type": "image_url", "image_url": {"url": "{image_url}"}},
+        ]),
+    ])
+
+    chain = prompt | llm | JsonOutputParser()
+    return chain
+    ### END YOUR CODE HERE
 
 
 def answer_queries(chain: Any, images: list[Path]) -> dict[str, Any]:
@@ -79,8 +139,38 @@ def answer_queries(chain: Any, images: list[Path]) -> dict[str, Any]:
     to process independent receipt-extraction prompts in parallel.
     """
     ### YOUR CODE HERE
-    _ = (chain, images)
-    return {QUERY_1: DUMMY_RESPONSE, QUERY_2: DUMMY_RESPONSE}
+    def answer_queries(chain: Any, images: list[Path]) -> dict[str, Any]:
+    """Run your chain and return one response for each exact query string."""
+    
+    from decimal import Decimal
+
+    total_final = Decimal("0")
+    total_no_discount = Decimal("0")
+
+    for img_path in images:
+        try:
+            url = image_data_url(img_path)
+            result = chain.invoke({"image_url": url})
+
+            final = Decimal(str(result.get("final_payment", 0)))
+            subtotal = Decimal(str(result.get("subtotal", 0)))
+            discounts = result.get("discounts", []) or []
+            discount_sum = sum(Decimal(str(d)) for d in discounts)
+
+            total_final += final
+            total_no_discount += subtotal + discount_sum
+
+            print(f"  {img_path.name}: final={final:.2f}, "
+                  f"no_discount={subtotal + discount_sum:.2f}")
+        except Exception as e:
+            print(f"[warn] failed on {img_path.name}: {e}")
+            continue
+
+    return {
+        QUERY_1: f"HK${total_final:.2f}",
+        QUERY_2: f"HK${total_no_discount:.2f}",
+    }
+    ### END YOUR CODE HERE
 
 
 # Everything below is provided runner/scoring code. No edits are needed.
