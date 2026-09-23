@@ -49,5 +49,25 @@ homework runner.
 
 
 ## Homework 1 solution: 
-> to students: please fill your solution description here.
+```mermaid
+flowchart TD
+    A["Load receipt images and initialize LangChain model"] --> B["Select next receipt and encode image"]
+    B --> C["deepseek-v4-flash-vision-exp extracts JSON"]
+    C --> D["Parse JSON and validate monetary fields"]
+    D --> E{"Extraction valid?"}
+    E -->|Yes| F["Use Decimal to accumulate final payment and subtotal plus discounts"]
+    E -->|No| G{"Fewer than three extraction attempts?"}
+    G -->|Yes| C
+    G -->|No| H["Record receipt failure"]
+    F --> I{"More receipts?"}
+    H --> I
+    I -->|Yes| B
+    I -->|No| J{"Any unresolved failures?"}
+    J -->|No| K["Format two HKD answers"]
+    J -->|Yes| L["Return explicit error responses"]
+    K --> M["Provided runner writes results.csv"]
+    L --> M
+```
+
+My solution uses a sequential extraction–validation–aggregation pipeline implemented with LangChain and `deepseek-v4-flash-vision-exp`. The model and prompts are initialized once in `build_chain()`. For each receipt, `answer_queries()` sends the image to the model and requests JSON containing the printed subtotal, all discount amounts, and the final payment after rounding. The prompt includes promotions, coupons, member offers, and Chinese-labelled packaging-damage markdowns, while excluding rounding from discounts. Python parses the response, checks the required fields and monetary values, and uses `Decimal` for arithmetic. Query 1 sums the final payments; Query 2 sums each subtotal plus the absolute values of its discounts, without adding back rounding. Empty, malformed, or invalid responses trigger another extraction, with up to three extraction attempts per receipt. If any receipt remains unresolved, the program returns explicit error responses instead of incomplete totals. Otherwise, it returns one HKD amount per query for the provided runner to write to `results.csv`. The final public-test run returned HK$1974.30 and HK$2348.20, both marked correct; performance on unseen receipts still depends on extraction accuracy.
 
