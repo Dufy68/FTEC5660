@@ -63,19 +63,15 @@ def build_chain() -> Any:
     ``deepseek-v4-flash-vision-exp``. The API key is loaded from .env.
     """
     ### YOUR CODE HERE
-    def build_chain() -> Any:
-    """Create and return your LangChain chain once."""
-    
     import os
     from langchain_core.prompts import ChatPromptTemplate
-    from langchain_core.output_parsers import JsonOutputParser
     from langchain_deepseek import ChatDeepSeek
 
     llm = ChatDeepSeek(
         model="deepseek-v4-flash-vision-exp",
         api_key=os.getenv("DEEPSEEK_API_KEY"),
         temperature=0,
-        max_tokens=512,
+        max_tokens=8192,
         max_retries=2,
         timeout=60,
     )
@@ -96,14 +92,24 @@ Extract exactly these three things:
    It already INCLUDES the ROUNDING adjustment. Do NOT add it again.
 
 2. subtotal:
-   The line labelled "SUBTOTAL" (before rounding and before any
-   discount is applied). If there is no explicit SUBTOTAL label,
-   use the sum of the item prices minus nothing else.
+   The printed line labelled "SUBTOTAL", before ROUNDING. This amount
+   may already include discounts. Do not replace it with a pre-discount
+   item total. If absent, derive it only when the receipt makes it clear.
 
 3. discounts:
    A list of every discount / promotion / coupon / "x% OFF" line on the
    receipt. Store each as a POSITIVE number (drop the minus sign).
    If there are no discounts, return an empty list [].
+   Scan the entire item section from top to bottom for negative monetary
+   entries, including Chinese-labelled markdowns such as 包裝變形
+   (damaged packaging), clearance, member pricing, and app offers.
+   A price reduction counts even without the words discount or Save.
+   Preserve separate occurrences of equal-valued discounts on different
+   items. Read the actual amount in the price column; promotional wording
+   may describe a per-offer saving rather than the total applied saving.
+   Exclude ROUNDING and do not count a repeated savings summary again.
+   For cash payments, distinguish the actual charge from cash tendered
+   and change. Do not use a remaining Octopus balance as payment.
 
 Return ONLY this JSON:
 {{
@@ -121,7 +127,7 @@ Return ONLY this JSON:
         ]),
     ])
 
-    chain = prompt | llm | JsonOutputParser()
+    chain = prompt | llm
     return chain
     ### END YOUR CODE HERE
 
@@ -139,32 +145,62 @@ def answer_queries(chain: Any, images: list[Path]) -> dict[str, Any]:
     to process independent receipt-extraction prompts in parallel.
     """
     ### YOUR CODE HERE
-    def answer_queries(chain: Any, images: list[Path]) -> dict[str, Any]:
-    """Run your chain and return one response for each exact query string."""
-    
     from decimal import Decimal
+    from langchain_core.output_parsers import JsonOutputParser
+
+    parser = JsonOutputParser()
+
+    def money(value):
+        if value is None or isinstance(value, bool):
+            raise ValueError("Missing monetary amount")
+        amount = Decimal(str(value).replace(",", ""))
+        if not amount.is_finite():
+            raise ValueError("Non-finite monetary amount")
+        if amount != amount.quantize(Decimal("0.01")):
+            raise ValueError("Invalid monetary precision")
+        return amount
 
     total_final = Decimal("0")
     total_no_discount = Decimal("0")
+    failed = []
 
     for img_path in images:
-        try:
-            url = image_data_url(img_path)
-            result = chain.invoke({"image_url": url})
+        for attempt in range(3):
+            try:
+                response = chain.invoke({"image_url": image_data_url(img_path)})
+                text = response_text(response)
+                metadata = getattr(response, "response_metadata", {}) or {}
+                print(f"  {img_path.name}: attempt={attempt + 1}, "
+                      f"finish_reason={metadata.get('finish_reason', 'unknown')}, "
+                      f"response_chars={len(text)}")
+                if not text:
+                    raise ValueError("Model returned empty answer content")
+                result = parser.parse(text)
+                if not isinstance(result, dict):
+                    raise ValueError("Expected a JSON object")
+                final = money(result.get("final_payment"))
+                subtotal = money(result.get("subtotal"))
+                discounts = result.get("discounts")
+                if not isinstance(discounts, list):
+                    raise ValueError("Missing discount list")
+                discount_sum = sum((abs(money(d)) for d in discounts), Decimal("0"))
+                if final < 0 or subtotal < 0:
+                    raise ValueError("Unexpected negative total")
+                total_final += final
+                total_no_discount += subtotal + discount_sum
+                print(f"  {img_path.name}: final={final:.2f}, "
+                      f"no_discount={subtotal + discount_sum:.2f}")
+                break
+            except Exception as exc:
+                print(f"[warn] {img_path.name}, attempt {attempt + 1}: "
+                      f"{type(exc).__name__}")
+        else:
+            failed.append(img_path.name)
 
-            final = Decimal(str(result.get("final_payment", 0)))
-            subtotal = Decimal(str(result.get("subtotal", 0)))
-            discounts = result.get("discounts", []) or []
-            discount_sum = sum(Decimal(str(d)) for d in discounts)
-
-            total_final += final
-            total_no_discount += subtotal + discount_sum
-
-            print(f"  {img_path.name}: final={final:.2f}, "
-                  f"no_discount={subtotal + discount_sum:.2f}")
-        except Exception as e:
-            print(f"[warn] failed on {img_path.name}: {e}")
-            continue
+    if failed:
+        print("[error] Unresolved receipts: " + ", ".join(failed))
+        error = "ERROR: receipt extraction incomplete; see terminal output"
+        return {QUERY_1: error, QUERY_2: error}
 
     return {
         QUERY_1: f"HK${total_final:.2f}",
